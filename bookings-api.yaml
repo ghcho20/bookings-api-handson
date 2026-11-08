@@ -1,0 +1,1121 @@
+openapi: 3.1.0
+info:
+  title: Bookings API
+  version: 1.0.0
+  summary: Reserve time slots on bookable resources.
+  description: |
+    A domain-neutral reservation API. A **resource** is anything that can be
+    booked for a time range: a meeting room, a table, a technician, a device.
+
+    ## Booking lifecycle
+
+    ```
+    pending ──confirm──▶ confirmed ──(end_time passes)──▶ completed
+       │                     │
+       └────────cancel───────┴──────▶ cancelled
+    ```
+
+    Illegal transitions (for example confirming a cancelled booking) return
+    `409 Conflict`.
+
+    ## Conventions
+
+    - JSON bodies use `snake_case`; timestamps are RFC 3339 in UTC.
+    - List endpoints use cursor pagination (`limit`, `cursor`).
+    - `POST /bookings` requires an `Idempotency-Key` header so retries are safe.
+    - Errors follow RFC 9457 (`application/problem+json`).
+    - Rate limited per API key; `429` responses carry `Retry-After`.
+  contact:
+    name: Bookings API Team
+    email: bookings-api@example.com
+  license:
+    name: Apache 2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: https://api.bookings.example.com/v1
+    description: Production. Set the collection's baseUrl variable to point at staging or a mock.
+
+tags:
+  - name: Resources
+    description: Things that can be booked, and when they are free.
+  - name: Bookings
+    description: Create and manage reservations.
+  - name: Webhooks
+    description: Subscribe to booking events.
+
+security:
+  - ApiKeyAuth: []
+  - OAuth2:
+      - bookings:read
+      - bookings:write
+
+paths:
+  /resources:
+    get:
+      operationId: listBookings
+      tags: [Resources]
+      summary: List bookable resources
+      description: Returns bookable resources, optionally filtered by type or location.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:read"]
+      parameters:
+        - name: type
+          in: query
+          description: Filter by resource type.
+          schema:
+            $ref: "#/components/schemas/ResourceTypeFilter"
+        - name: location
+          in: query
+          description: Filter by location code.
+          schema:
+            $ref: "#/components/schemas/LocationFilter"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of resources.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceList"
+              examples:
+                default:
+                  $ref: "#/components/examples/ResourceListExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /resources/{resource_id}:
+    get:
+      operationId: getBooking
+      tags: [Resources]
+      summary: Get a resource
+      description: Returns a single bookable resource.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:read"]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: The resource.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+              examples:
+                default:
+                  $ref: "#/components/examples/ResourceExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /resources/{resource_id}/availability:
+    get:
+      operationId: getResourceAvailability
+      tags: [Resources]
+      summary: Get free time slots for a resource
+      description: |
+        Returns the free slots of a resource inside the requested window.
+        The window may not exceed 14 days.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:read"]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+        - name: from
+          in: query
+          required: true
+          description: Start of the window (RFC 3339, UTC).
+          schema:
+            $ref: "#/components/schemas/WindowStartString"
+        - name: to
+          in: query
+          required: true
+          description: End of the window (RFC 3339, UTC).
+          schema:
+            $ref: "#/components/schemas/WindowEndString"
+      responses:
+        "200":
+          description: Free slots inside the window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Availability"
+              examples:
+                default:
+                  $ref: "#/components/examples/AvailabilityExample"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /bookings:
+    get:
+      operationId: listBookings
+      tags: [Bookings]
+      summary: List bookings
+      description: Returns bookings, newest first, with optional filters.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:read"]
+      parameters:
+        - name: status
+          in: query
+          description: Filter by booking status.
+          schema:
+            $ref: "#/components/schemas/BookingStatus"
+        - name: resource_id
+          in: query
+          description: Filter by resource.
+          schema:
+            $ref: "#/components/schemas/ResourceIdValue"
+        - name: customer_email
+          in: query
+          description: Filter by customer email address.
+          schema:
+            $ref: "#/components/schemas/EmailString"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of bookings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingList"
+              examples:
+                default:
+                  $ref: "#/components/examples/BookingListExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      operationId: createBooking
+      tags: [Bookings]
+      summary: Create a booking
+      description: |
+        Reserves a time range on a resource. The booking starts in `pending`.
+        Returns `409` if the slot is no longer free. Retrying with the same
+        `Idempotency-Key` returns the original result instead of creating a
+        duplicate.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingCreate"
+            examples:
+              default:
+                $ref: "#/components/examples/BookingCreateExample"
+      responses:
+        "201":
+          description: Booking created.
+          headers:
+            Location:
+              description: URL of the new booking.
+              schema:
+                $ref: "#/components/schemas/UriReferenceString"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+              examples:
+                default:
+                  $ref: "#/components/examples/BookingPendingExample"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The requested slot is already taken.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                slotTaken:
+                  summary: Slot already booked
+                  value:
+                    type: https://api.bookings.example.com/problems/slot-taken
+                    title: Slot already booked
+                    status: 409
+                    detail: Resource res_3f9a1c is not free between 2026-11-10T09:00:00Z and 2026-11-10T10:00:00Z.
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /bookings/{booking_id}:
+    get:
+      operationId: getBooking
+      tags: [Bookings]
+      summary: Get a booking
+      description: Returns a single booking.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:read"]
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      responses:
+        "200":
+          description: The booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+              examples:
+                default:
+                  $ref: "#/components/examples/BookingConfirmedExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    patch:
+      operationId: rescheduleBooking
+      tags: [Bookings]
+      summary: Reschedule a booking
+      description: |
+        Changes the time range and/or notes of a `pending` or `confirmed`
+        booking. Returns `409` if the new slot is taken or the booking is
+        already `cancelled` or `completed`.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:write"]
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingUpdate"
+            examples:
+              default:
+                value:
+                  start_time: "2026-11-10T14:00:00Z"
+                  end_time: "2026-11-10T15:00:00Z"
+      responses:
+        "200":
+          description: The updated booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+              examples:
+                default:
+                  $ref: "#/components/examples/BookingConfirmedExample"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /bookings/{booking_id}/confirm:
+    post:
+      operationId: updateBookingStatus
+      tags: [Bookings]
+      summary: Confirm a booking
+      description: |
+        Moves a `pending` booking to `confirmed` and emits the
+        `booking.confirmed` webhook. Returns `409` for any other status.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:write"]
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      responses:
+        "200":
+          description: The confirmed booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+              examples:
+                default:
+                  $ref: "#/components/examples/BookingConfirmedExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /bookings/{booking_id}/cancel:
+    post:
+      operationId: updateBookingStatus
+      tags: [Bookings]
+      summary: Cancel a booking
+      description: |
+        Moves a `pending` or `confirmed` booking to `cancelled`, frees the
+        slot, and emits the `booking.cancelled` webhook. Returns `409` if the
+        booking is already `cancelled` or `completed`.
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:write"]
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelBookingRequest"
+            examples:
+              default:
+                value:
+                  reason: Meeting moved to next week
+      responses:
+        "200":
+          description: The cancelled booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+              examples:
+                default:
+                  $ref: "#/components/examples/BookingCancelledExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /webhook-subscriptions:
+    post:
+      operationId: createWebhookSubscription
+      tags: [Webhooks]
+      summary: Subscribe to booking events
+      description: |
+        Registers an HTTPS endpoint to receive booking events. Each delivery is
+        signed; verify the `X-Signature` header (HMAC-SHA256 of the raw body
+        with the subscription `secret`).
+      security:
+        - ApiKeyAuth: []
+        - OAuth2: ["bookings:write"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookSubscriptionCreate"
+            examples:
+              default:
+                value:
+                  url: https://hooks.example.com/bookings
+                  events: [booking.confirmed, booking.cancelled]
+      responses:
+        "201":
+          description: Subscription created. The `secret` is only shown once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscription"
+              examples:
+                default:
+                  value:
+                    id: whs_71c0de
+                    url: https://hooks.example.com/bookings
+                    events: [booking.confirmed, booking.cancelled]
+                    secret: whsec_REPLACE_WITH_REAL_SECRET
+                    created_at: "2026-11-03T06:00:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+webhooks:
+  booking.confirmed:
+    post:
+      operationId: onBookingConfirmed
+      tags: [Webhooks]
+      summary: A booking was confirmed
+      description: Sent after a booking moves from `pending` to `confirmed`.
+      parameters:
+        - $ref: "#/components/parameters/SignatureHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingEvent"
+            examples:
+              default:
+                value:
+                  id: evt_a1b2c3
+                  type: booking.confirmed
+                  created_at: "2026-11-03T06:05:00Z"
+                  data:
+                    id: bkg_9d2e47
+                    resource_id: res_3f9a1c
+                    status: confirmed
+                    start_time: "2026-11-10T09:00:00Z"
+                    end_time: "2026-11-10T10:00:00Z"
+                    customer:
+                      name: Jisoo Kim
+                      email: jisoo.kim@example.com
+                    notes: Quarterly planning
+                    cancel_reason: null
+                    created_at: "2026-11-03T06:00:00Z"
+      responses:
+        "200":
+          description: Acknowledged. Any non-2xx response is retried with exponential backoff for 24 hours.
+  booking.cancelled:
+    post:
+      operationId: onBookingCancelled
+      tags: [Webhooks]
+      summary: A booking was cancelled
+      description: Sent after a booking moves to `cancelled`.
+      parameters:
+        - $ref: "#/components/parameters/SignatureHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingEvent"
+            examples:
+              default:
+                value:
+                  id: evt_d4e5f6
+                  type: booking.cancelled
+                  created_at: "2026-11-03T07:00:00Z"
+                  data:
+                    id: bkg_9d2e47
+                    resource_id: res_3f9a1c
+                    status: cancelled
+                    start_time: "2026-11-10T09:00:00Z"
+                    end_time: "2026-11-10T10:00:00Z"
+                    customer:
+                      name: Jisoo Kim
+                      email: jisoo.kim@example.com
+                    notes: Quarterly planning
+                    cancel_reason: Meeting moved to next week
+                    created_at: "2026-11-03T06:00:00Z"
+      responses:
+        "200":
+          description: Acknowledged. Any non-2xx response is retried with exponential backoff for 24 hours.
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Server-to-server API key. Send it in the `X-API-Key` header.
+    OAuth2:
+      type: oauth2
+      description: OAuth 2.0 client credentials for scoped, short-lived access.
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.bookings.example.com/oauth/token
+          scopes:
+            bookings:read: Read resources, availability, and bookings.
+            bookings:write: Create and change bookings and webhook subscriptions.
+
+  parameters:
+    ResourceId:
+      name: resource_id
+      in: path
+      required: true
+      description: Resource identifier.
+      schema:
+        $ref: "#/components/schemas/ResourceIdValue"
+    BookingId:
+      name: booking_id
+      in: path
+      required: true
+      description: Booking identifier.
+      schema:
+        $ref: "#/components/schemas/BookingIdValue"
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items to return.
+      schema:
+        $ref: "#/components/schemas/LimitValue"
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from a previous response's `next_cursor`.
+      schema:
+        $ref: "#/components/schemas/CursorValue"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique key (for example a UUID) that makes retries of this request safe.
+      schema:
+        $ref: "#/components/schemas/IdempotencyKeyValue"
+    SignatureHeader:
+      name: X-Signature
+      in: header
+      required: true
+      description: Hex HMAC-SHA256 of the raw request body, keyed with the subscription secret.
+      schema:
+        $ref: "#/components/schemas/SignatureHeaderValue"
+
+  schemas:
+    BookingStatus:
+      type: string
+      description: Lifecycle state of a booking.
+      enum: [pending, confirmed, completed, cancelled]
+    Resource:
+      type: object
+      required: [id, name, type, location, capacity]
+      properties:
+        id:
+          type: string
+          description: Resource identifier.
+          examples: [res_3f9a1c]
+        name:
+          type: string
+          description: Display name.
+          examples: [Han River Room]
+        type:
+          type: string
+          description: Resource type.
+          examples: [meeting_room]
+        location:
+          type: string
+          description: Location code.
+          examples: [seoul-hq]
+        capacity:
+          type: integer
+          description: How many people or units the resource can host.
+          minimum: 1
+          examples: [8]
+    ResourceList:
+      type: object
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Resource"
+        next_cursor:
+          type: [string, "null"]
+          description: Pass as `cursor` to fetch the next page; null on the last page.
+    TimeSlot:
+      type: object
+      required: [start_time, end_time]
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          description: Slot start (UTC).
+        end_time:
+          type: string
+          format: date-time
+          description: Slot end (UTC).
+    Availability:
+      type: object
+      required: [resource_id, slots]
+      properties:
+        resource_id:
+          type: string
+          description: The resource the slots belong to.
+        slots:
+          type: array
+          description: Free slots inside the requested window.
+          items:
+            $ref: "#/components/schemas/TimeSlot"
+    Customer:
+      type: object
+      required: [name, email]
+      properties:
+        name:
+          type: string
+          description: Customer name.
+          examples: [Jisoo Kim]
+        email:
+          type: string
+          format: email
+          description: Customer email address.
+          examples: [jisoo.kim@example.com]
+    BookingCreate:
+      type: object
+      required: [resource_id, start_time, end_time, customer]
+      properties:
+        resource_id:
+          type: string
+          description: Resource to book.
+        start_time:
+          type: string
+          format: date-time
+          description: Booking start (UTC).
+        end_time:
+          type: string
+          format: date-time
+          description: Booking end (UTC); must be after `start_time`.
+        customer:
+          $ref: "#/components/schemas/Customer"
+        notes:
+          type: string
+          description: Free-text notes.
+          maxLength: 1000
+    BookingUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          description: New start (UTC).
+        end_time:
+          type: string
+          format: date-time
+          description: New end (UTC).
+        notes:
+          type: string
+          description: Replacement notes.
+          maxLength: 1000
+    Booking:
+      type: object
+      required: [id, resource_id, status, start_time, end_time, customer, created_at]
+      properties:
+        id:
+          type: string
+          description: Booking identifier.
+        resource_id:
+          type: string
+          description: The booked resource.
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+        start_time:
+          type: string
+          format: date-time
+          description: Booking start (UTC).
+        end_time:
+          type: string
+          format: date-time
+          description: Booking end (UTC).
+        customer:
+          $ref: "#/components/schemas/Customer"
+        notes:
+          type: [string, "null"]
+          description: Free-text notes.
+        cancel_reason:
+          type: [string, "null"]
+          description: Set when the booking is cancelled.
+        created_at:
+          type: string
+          format: date-time
+          description: Creation time (UTC).
+    BookingList:
+      type: object
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Booking"
+        next_cursor:
+          type: [string, "null"]
+          description: Pass as `cursor` to fetch the next page; null on the last page.
+    BookingEvent:
+      type: object
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          description: Unique event identifier; use it to deduplicate deliveries.
+        type:
+          type: string
+          description: Event type.
+          enum: [booking.confirmed, booking.cancelled]
+        created_at:
+          type: string
+          format: date-time
+          description: When the event was emitted (UTC).
+        data:
+          $ref: "#/components/schemas/Booking"
+    WebhookSubscriptionCreate:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTPS endpoint that receives events.
+        events:
+          type: array
+          description: Event types to receive.
+          minItems: 1
+          items:
+            type: string
+            enum: [booking.confirmed, booking.cancelled]
+    WebhookSubscription:
+      type: object
+      required: [id, url, events, created_at]
+      properties:
+        id:
+          type: string
+          description: Subscription identifier.
+        url:
+          type: string
+          format: uri
+          description: Delivery endpoint.
+        events:
+          type: array
+          description: Subscribed event types.
+          items:
+            type: string
+        secret:
+          type: string
+          description: Signing secret; only returned when the subscription is created.
+        created_at:
+          type: string
+          format: date-time
+          description: Creation time (UTC).
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type.
+        title:
+          type: string
+          description: Short, human-readable summary.
+        status:
+          type: integer
+          description: HTTP status code.
+        detail:
+          type: string
+          description: Explanation specific to this occurrence.
+        errors:
+          type: array
+          description: Field-level validation errors, when applicable.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+                description: Name of the invalid field.
+              message:
+                type: string
+                description: What is wrong with it.
+    ResourceTypeFilter:
+      type: string
+      description: Resource type filter value.
+      examples: [meeting_room]
+    LocationFilter:
+      type: string
+      description: Location code filter value.
+      examples: [seoul-hq]
+    DateTimeString:
+      type: string
+      format: date-time
+      description: RFC 3339 timestamp in UTC.
+      examples: ["2026-11-10T09:00:00Z"]
+    WindowStartString:
+      type: string
+      format: date-time
+      description: RFC 3339 timestamp in UTC. Start of a time window.
+      examples: ["2026-11-10T09:00:00Z"]
+    WindowEndString:
+      type: string
+      format: date-time
+      description: RFC 3339 timestamp in UTC. End of a time window.
+      examples: ["2026-11-10T18:00:00Z"]
+    EmailString:
+      type: string
+      format: email
+      description: Email address.
+      examples: [jisoo.kim@example.com]
+    UriReferenceString:
+      type: string
+      format: uri-reference
+      description: URI reference string.
+      examples: [/v1/bookings/bkg_9d2e47]
+    CancelBookingRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Free-text cancellation reason.
+          maxLength: 500
+    ResourceIdValue:
+      type: string
+      description: Resource identifier.
+      examples: [res_3f9a1c]
+    BookingIdValue:
+      type: string
+      description: Booking identifier.
+      examples: [bkg_9d2e47]
+    LimitValue:
+      type: integer
+      description: Maximum number of items to return.
+      minimum: 1
+      maximum: 100
+      default: 20
+    CursorValue:
+      type: string
+      description: Opaque pagination cursor.
+      examples: [eyJvIjoyMH0]
+    IdempotencyKeyValue:
+      type: string
+      description: Unique idempotency key.
+      minLength: 8
+      maxLength: 64
+      examples: [7b0c1d5e-3a47-4a8e-9f10-2c6d8e4b1a90]
+    SignatureHeaderValue:
+      type: string
+      description: Hex HMAC-SHA256 signature.
+    RetryAfterSeconds:
+      type: integer
+      description: Seconds to wait before retrying.
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/bad-request
+                title: Bad request
+                status: 400
+                detail: Query parameter 'from' must be an RFC 3339 timestamp.
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/unauthorized
+                title: Unauthorized
+                status: 401
+                detail: A valid X-API-Key header or bearer token is required.
+    NotFound:
+      description: The resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/not-found
+                title: Not found
+                status: 404
+                detail: No booking with id bkg_does_not_exist.
+    Conflict:
+      description: The request conflicts with the booking's current state.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/invalid-transition
+                title: Invalid status transition
+                status: 409
+                detail: Booking bkg_9d2e47 is cancelled and cannot be confirmed.
+    Unprocessable:
+      description: The request is well-formed but fails validation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/validation-error
+                title: Validation failed
+                status: 422
+                errors:
+                  - field: end_time
+                    message: end_time must be after start_time
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            $ref: "#/components/schemas/RetryAfterSeconds"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/rate-limited
+                title: Too many requests
+                status: 429
+                detail: Rate limit of 100 requests per minute exceeded.
+    InternalServerError:
+      description: An unexpected server error occurred.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/internal-server-error
+                title: Internal server error
+                status: 500
+                detail: An unexpected error occurred. Please try again later.
+
+  examples:
+    ResourceExample:
+      value:
+        id: res_3f9a1c
+        name: Han River Room
+        type: meeting_room
+        location: seoul-hq
+        capacity: 8
+    ResourceListExample:
+      value:
+        data:
+          - id: res_3f9a1c
+            name: Han River Room
+            type: meeting_room
+            location: seoul-hq
+            capacity: 8
+          - id: res_8b44d0
+            name: Namsan Room
+            type: meeting_room
+            location: seoul-hq
+            capacity: 4
+        next_cursor: null
+    AvailabilityExample:
+      value:
+        resource_id: res_3f9a1c
+        slots:
+          - start_time: "2026-11-10T09:00:00Z"
+            end_time: "2026-11-10T10:00:00Z"
+          - start_time: "2026-11-10T13:00:00Z"
+            end_time: "2026-11-10T17:00:00Z"
+    BookingCreateExample:
+      value:
+        resource_id: res_3f9a1c
+        start_time: "2026-11-10T09:00:00Z"
+        end_time: "2026-11-10T10:00:00Z"
+        customer:
+          name: Jisoo Kim
+          email: jisoo.kim@example.com
+        notes: Quarterly planning
+    BookingPendingExample:
+      value:
+        id: bkg_9d2e47
+        resource_id: res_3f9a1c
+        status: pending
+        start_time: "2026-11-10T09:00:00Z"
+        end_time: "2026-11-10T10:00:00Z"
+        customer:
+          name: Jisoo Kim
+          email: jisoo.kim@example.com
+        notes: Quarterly planning
+        cancel_reason: null
+        created_at: "2026-11-03T06:00:00Z"
+    BookingConfirmedExample:
+      value:
+        id: bkg_9d2e47
+        resource_id: res_3f9a1c
+        status: confirmed
+        start_time: "2026-11-10T09:00:00Z"
+        end_time: "2026-11-10T10:00:00Z"
+        customer:
+          name: Jisoo Kim
+          email: jisoo.kim@example.com
+        notes: Quarterly planning
+        cancel_reason: null
+        created_at: "2026-11-03T06:00:00Z"
+    BookingCancelledExample:
+      value:
+        id: bkg_9d2e47
+        resource_id: res_3f9a1c
+        status: cancelled
+        start_time: "2026-11-10T09:00:00Z"
+        end_time: "2026-11-10T10:00:00Z"
+        customer:
+          name: Jisoo Kim
+          email: jisoo.kim@example.com
+        notes: Quarterly planning
+        cancel_reason: Meeting moved to next week
+        created_at: "2026-11-03T06:00:00Z"
+    BookingListExample:
+      value:
+        data:
+          - id: bkg_9d2e47
+            resource_id: res_3f9a1c
+            status: confirmed
+            start_time: "2026-11-10T09:00:00Z"
+            end_time: "2026-11-10T10:00:00Z"
+            customer:
+              name: Jisoo Kim
+              email: jisoo.kim@example.com
+            notes: Quarterly planning
+            cancel_reason: null
+            created_at: "2026-11-03T06:00:00Z"
+        next_cursor: null

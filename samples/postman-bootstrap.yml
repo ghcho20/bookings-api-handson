@@ -1,0 +1,53 @@
+# SAMPLE: generate the [Baseline], [Smoke] and [Contract] collections from the spec (manual).
+# Copy to .github/workflows/postman-bootstrap.yml. Proven on GitHub in the first build (23 s).
+#
+# Needs: secret POSTMAN_SERVICE_ACCOUNT_API_KEY. A PERSONAL key is rejected
+#   (HTTP 401 "Personal API key detected"). Create a Postman service account, generate its
+#   key, and add the service account to the workspace (required if the workspace is private).
+#   Service accounts must be enabled for the team.
+#
+# What it does: updates the spec in Spec Hub and creates/refreshes three collections in the
+# CLOUD workspace. It does NOT write to Git. Afterwards, on your machine:
+#   postman workspace pull
+#   git checkout -- <spec file> <other files the pull merely reformatted>   # the pull rewrites the
+#                                                                           # spec as JSON; keep yours
+#   git add the three new collection folders + .postman/resources.yaml; commit; push
+# Do not auto-pull. Do not hand-edit the generated collections (a refresh overwrites them).
+#
+# Manual only. To run on spec changes later, add:
+#   push: { branches: [main], paths: [bookings-api.yaml] }
+# Never run it on pull requests (a non-breaking change would still write to the workspace).
+name: Bootstrap Postman test collections
+
+on:
+  workflow_dispatch:
+
+concurrency:                 # shared with the publish workflow: one cloud writer at a time
+  group: postman-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # The action mints its own access token from the API key; no separate token step needed.
+      # workspace-id / spec-id: take them from .postman/resources.yaml (written when the
+      # workspace was linked and the spec pushed). Passing workspace-id reuses the workspace and
+      # skips the org sub-team lookup, so workspace-team-id is not needed.
+      - uses: postman-cs/postman-bootstrap-action@v2.23.4      # pin; "v2" is a moving tag
+        with:
+          project-name: Bookings API
+          spec-path: bookings-api.yaml
+          workspace-id: <WORKSPACE_ID>
+          spec-id: <SPEC_ID>
+          postman-api-key: ${{ secrets.POSTMAN_SERVICE_ACCOUNT_API_KEY }}
+
+# Run results you will see: [Contract] has one collection-level script (~690 KB) holding every check,
+# request files carry no scripts. Generated Webhooks requests have a broken URL: run the generated
+# collections with  -i resources -i bookings -i webhook-subscriptions  (folder names as generated).
