@@ -85,6 +85,8 @@ paths:
                   $ref: "#/components/examples/ResourceListExample"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -113,6 +115,8 @@ paths:
                   $ref: "#/components/examples/ResourceExample"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -159,6 +163,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -205,6 +211,8 @@ paths:
                   $ref: "#/components/examples/BookingListExample"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -251,6 +259,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -297,6 +307,8 @@ paths:
                   $ref: "#/components/examples/BookingConfirmedExample"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -341,6 +353,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -377,6 +391,8 @@ paths:
                   $ref: "#/components/examples/BookingConfirmedExample"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -422,6 +438,8 @@ paths:
                   $ref: "#/components/examples/BookingCancelledExample"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -473,6 +491,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "422":
           $ref: "#/components/responses/Unprocessable"
         "429":
@@ -922,6 +942,10 @@ components:
     SignatureHeaderValue:
       type: string
       description: Hex HMAC-SHA256 signature.
+    WwwAuthenticateValue:
+      type: string
+      description: HTTP authentication challenge (RFC 9110 section 11.6.1).
+      examples: ['Bearer realm="bookings-api"']
     RetryAfterSeconds:
       type: integer
       description: Seconds to wait before retrying.
@@ -942,6 +966,11 @@ components:
                 detail: Query parameter 'from' must be an RFC 3339 timestamp.
     Unauthorized:
       description: Missing or invalid credentials.
+      headers:
+        WWW-Authenticate:
+          description: Authentication challenge for retrying the request (RFC 9110 section 11.6.1).
+          schema:
+            $ref: "#/components/schemas/WwwAuthenticateValue"
       content:
         application/problem+json:
           schema:
@@ -953,6 +982,19 @@ components:
                 title: Unauthorized
                 status: 401
                 detail: A valid X-API-Key header or bearer token is required.
+    Forbidden:
+      description: Authenticated but missing the scope required for this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            default:
+              value:
+                type: https://api.bookings.example.com/problems/insufficient-scope
+                title: Insufficient scope
+                status: 403
+                detail: This operation requires the 'bookings:write' scope.
     NotFound:
       description: The resource does not exist.
       content:

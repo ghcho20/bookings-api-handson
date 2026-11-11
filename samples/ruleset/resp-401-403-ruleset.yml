@@ -1,0 +1,44 @@
+# Custom governance ruleset: closes the 2 real spec gaps behind the Bootstrap
+# warnings CONTRACT_401_WWW_AUTHENTICATE and CONTRACT_SECURITY_RESPONSES_INCOMPLETE,
+# at design time instead of discovering them after running Bootstrap.
+#
+# Verified locally against bookings-api.yaml with `npx @stoplight/spectral-cli`
+# (the same Spectral v6 engine Postman's governance rulesets run on):
+#   - www-authenticate-on-401: 1 finding (the shared Unauthorized response
+#     component — fixing it there fixes all 10 operations that $ref it)
+#   - scoped-operation-requires-403: 10 findings, one per operation that
+#     offers a scoped security alternative; confirmed it does NOT fire on an
+#     operation secured only by an unscoped scheme (e.g. API key alone)
+#
+# Does not `extends: spectral:oas` on purpose — this is a narrow add-on next
+# to the team's existing Postman Standard / OWASP rulesets, not a replacement.
+formats: ["oas3"]
+
+functions:
+  - scopedOperationRequires403
+functionsDir: ./functions
+
+rules:
+  www-authenticate-on-401:
+    description: >
+      A secured operation documenting a 401 response must also declare the
+      WWW-Authenticate header (RFC 9110 section 11.6.1), so callers know how
+      to re-authenticate.
+    message: "{{path}}: 401 response has no WWW-Authenticate header"
+    severity: warn
+    given: "$.paths[*][get,post,put,patch,delete].responses.401"
+    then:
+      field: headers.WWW-Authenticate
+      function: truthy
+
+  scoped-operation-requires-403:
+    description: >
+      An operation that accepts a scoped security alternative (e.g. OAuth2
+      with scopes) must document a 403 response for a valid-but-insufficiently-
+      scoped caller (RFC 9110 section 15.5.4). Does not apply to operations
+      secured only by an unscoped scheme such as a bare API key — that path
+      has no scope concept to deny.
+    severity: warn
+    given: "$.paths[*][get,post,put,patch,delete]"
+    then:
+      function: scopedOperationRequires403
