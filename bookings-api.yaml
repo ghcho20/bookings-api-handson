@@ -53,7 +53,7 @@ security:
 paths:
   /resources:
     get:
-      operationId: listBookings
+      operationId: listResources
       tags: [Resources]
       summary: List bookable resources
       description: Returns bookable resources, optionally filtered by type or location.
@@ -92,7 +92,7 @@ paths:
 
   /resources/{resource_id}:
     get:
-      operationId: getBooking
+      operationId: getResource
       tags: [Resources]
       summary: Get a resource
       description: Returns a single bookable resource.
@@ -354,7 +354,7 @@ paths:
 
   /bookings/{booking_id}/confirm:
     post:
-      operationId: updateBookingStatus
+      operationId: confirmBooking
       tags: [Bookings]
       summary: Confirm a booking
       description: |
@@ -388,7 +388,7 @@ paths:
 
   /bookings/{booking_id}/cancel:
     post:
-      operationId: updateBookingStatus
+      operationId: cancelBooking
       tags: [Bookings]
       summary: Cancel a booking
       description: |
