@@ -1,0 +1,119 @@
+# Regenerates the [Baseline], [Smoke] and [Contract] collections from bookings-api.yaml, pushes the
+# result to the Postman workspace, and commits the generated files + cloud IDs to main.
+# Runs automatically when bookings-api.yaml changes on main; also runnable by hand.
+#
+# Needs: secret POSTMAN_SERVICE_ACCOUNT_API_KEY. A PERSONAL key is rejected
+#   (HTTP 401 "Personal API key detected"). Create a Postman service account, generate its
+#   key, and add the service account to the workspace (required if the workspace is private).
+#   Service accounts must be enabled for the team.
+#   The GitHub Actions bot must be allowed to push to main (ruleset bypass if main is protected).
+#
+# How it works (no `postman workspace pull` needed):
+#   1. The bootstrap action updates the spec in Spec Hub, creates/refreshes the three collections
+#      in the cloud, AND writes them into this runner's checkout (postman/collections/*,
+#      .postman/workflows.yaml). Nothing commits them, so step 5 does.
+#   2. The action rewrites .postman/resources.yaml into a `canonical:` + `version: 2` form, dropping
+#      `cloudResources:`. The Postman CLI (and postman-publish.yml) use `cloudResources:`, so step 3
+#      merges canonical back into cloudResources BEFORE the push; otherwise the push could not find
+#      the IDs and might create duplicates.
+#   3. `postman workspace push --yes` reconciles the rest (globals, etc.) and records their IDs.
+#   4. The commit step adds only generated content + IDs: postman/, .postman/workflows.yaml and
+#      .postman/resources.yaml. It never adds bookings-api.yaml (so the bot commit cannot retrigger
+#      this workflow) nor the action's scratch files (.postman/*ledger.json, *manifest.json).
+#      If the action or push fails, only resources.yaml is committed, so IDs of anything that was
+#      already created are not lost but half-generated collections are not committed.
+#   The commit uses GITHUB_TOKEN, which does not trigger other workflows.
+#
+# Do not hand-edit the generated collections (a refresh overwrites them).
+# Never run it on pull requests (a non-breaking change would still write to the workspace).
+name: Bootstrap Postman test collections
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - bookings-api.yaml
+  workflow_dispatch:
+
+concurrency:                 # shared with the publish workflow: one cloud writer at a time
+  group: postman-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # to commit generated files and cloud IDs back to main
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # workspace-id / spec-id / collection IDs are NOT passed: the action reads them from the
+      # committed .postman/resources.yaml (cloudResources:), so this file stays portable.
+      # workspace-team-id only matters when a workspace has to be created for the first time.
+      - name: Bootstrap collections from the spec
+        id: boot
+        uses: postman-cs/postman-bootstrap-action@v2.23.4      # pin; "v2" is a moving tag
+        with:
+          project-name: Bookings API
+          spec-path: bookings-api.yaml
+          workspace-team-id: '13347347'
+          postman-api-key: ${{ secrets.POSTMAN_SERVICE_ACCOUNT_API_KEY }}
+
+      # The action leaves resources.yaml as canonical:/version: only. Merge canonical into
+      # cloudResources and drop both keys so the CLI sees the IDs. Runs even if the action failed,
+      # so any IDs it did record are kept. yq v4 is preinstalled on GitHub's ubuntu runners.
+      - name: Normalize resources.yaml (canonical -> cloudResources)
+        if: always()
+        run: |
+          yq --version
+          yq -i '.cloudResources = ((.cloudResources // {}) * (.canonical // {})) | del(.canonical) | del(.version)' .postman/resources.yaml
+          cat .postman/resources.yaml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Postman CLI        # pin the version proven in postman-publish.yml
+        run: npm install -g postman-cli@1.73.0
+
+      - name: Log in to Postman
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_SERVICE_ACCOUNT_API_KEY }}
+        run: |
+          if [ -z "$POSTMAN_API_KEY" ]; then echo "::error::POSTMAN_API_KEY is not set."; exit 1; fi
+          postman login --with-api-key "$POSTMAN_API_KEY"
+
+      - name: Push to workspace         # reconcile: records IDs for globals etc.; default never deletes
+        id: push
+        run: postman workspace push --yes
+
+      # Same normalization again: the push may rewrite resources.yaml (and may add canonical:/version:).
+      - name: Record generated files and IDs
+        if: always() && github.ref == 'refs/heads/main'
+        env:
+          PUSH_OUTCOME: ${{ steps.push.outcome }}
+        run: |
+          yq -i '.cloudResources = ((.cloudResources // {}) * (.canonical // {})) | del(.canonical) | del(.version)' .postman/resources.yaml
+          if [ "$PUSH_OUTCOME" = "success" ]; then
+            paths=(postman .postman/workflows.yaml .postman/resources.yaml)
+          else
+            echo "::warning::Push did not succeed; committing only .postman/resources.yaml"
+            paths=(.postman/resources.yaml)
+          fi
+          git add -- "${paths[@]}"
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Bootstrap: record generated collections and Postman cloud IDs"
+          git pull --rebase --autostash origin main
+          git push origin HEAD:main
+
+# Run results you will see: [Contract] has one collection-level script (~690 KB) holding every check,
+# request files carry no scripts. Generated Webhooks requests have a broken URL: run the generated
+# collections with  -i resources -i bookings -i webhook-subscriptions  (folder names as generated).

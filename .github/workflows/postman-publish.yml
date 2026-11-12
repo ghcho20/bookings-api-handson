@@ -14,11 +14,13 @@ name: Publish to Postman workspace
 # .postman/resources.yaml is excluded: this workflow itself commits new cloud IDs there
 # after a push, and that commit must not retrigger a publish. (Other .postman/ files such
 # as workflows.yaml still trigger it.)
+# bookings-api.yaml is NOT a trigger here: a spec change is handled by postman-bootstrap.yml,
+# which regenerates the collections and pushes them itself. Running both on one spec merge
+# would only race for the shared concurrency group.
 on:
   push:
     branches: [main]
     paths:
-      - bookings-api.yaml
       - postman/**
       - .postman/**
       - '!.postman/resources.yaml'
@@ -76,5 +78,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .postman/resources.yaml
           git commit -m "Record new Postman cloud IDs in resources.yaml"
-          git pull --rebase origin main
+          git pull --rebase --autostash origin main
           git push origin HEAD:main
