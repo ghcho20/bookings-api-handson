@@ -102,6 +102,18 @@ jobs:
             echo "::warning::Push did not succeed; committing only .postman/resources.yaml"
             paths=(.postman/resources.yaml)
           fi
+          # The action regenerates a random "- id: <uuid>" inside each collection's auth: block on
+          # every refresh. Restore tracked files whose ONLY change is that id, so an unchanged spec
+          # yields "Nothing to commit" instead of a noise commit. Real edits are untouched, and new
+          # (untracked) files are never filtered, so the first run still commits everything.
+          UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+          while IFS= read -r -d '' f; do
+            other=$(git diff -U0 -- "$f" | grep -E '^[+-]' | grep -v -E '^(\+\+\+|---) ' | grep -v -E "^[+-][[:space:]]+- id: ${UUID}$" || true)
+            if [ -z "$other" ] && git diff -U1 -- "$f" | grep -q -E '^ auth:$'; then
+              echo "Ignoring auth-id-only change: $f"
+              git checkout -- "$f"
+            fi
+          done < <(git diff --name-only -z -- postman)
           git add -- "${paths[@]}"
           if git diff --cached --quiet; then
             echo "Nothing to commit."
