@@ -106,14 +106,21 @@ jobs:
           # every refresh. Restore tracked files whose ONLY change is that id, so an unchanged spec
           # yields "Nothing to commit" instead of a noise commit. Real edits are untouched, and new
           # (untracked) files are never filtered, so the first run still commits everything.
+          # Read the file list FIRST (mapfile waits for git diff to exit), then modify. Streaming it
+          # with `done < <(git diff ...)` raced: git diff may hold .git/index.lock while it refreshes
+          # the index, and the loop body's `git checkout` then failed with "index.lock: File exists".
+          # GIT_OPTIONAL_LOCKS=0 stops the read-only diffs from taking that lock at all.
+          export GIT_OPTIONAL_LOCKS=0
           UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-          while IFS= read -r -d '' f; do
+          mapfile -d '' changed < <(git diff --name-only -z -- postman)
+          for f in "${changed[@]}"; do
             other=$(git diff -U0 -- "$f" | grep -E '^[+-]' | grep -v -E '^(\+\+\+|---) ' | grep -v -E "^[+-][[:space:]]+- id: ${UUID}$" || true)
             if [ -z "$other" ] && git diff -U1 -- "$f" | grep -q -E '^ auth:$'; then
               echo "Ignoring auth-id-only change: $f"
               git checkout -- "$f"
             fi
-          done < <(git diff --name-only -z -- postman)
+          done
+          unset GIT_OPTIONAL_LOCKS
           git add -- "${paths[@]}"
           if git diff --cached --quiet; then
             echo "Nothing to commit."
