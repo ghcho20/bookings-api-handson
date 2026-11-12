@@ -1,0 +1,80 @@
+# CI pushes the repo to the Postman cloud workspace (automatic, on merge to main).
+#
+# Needs: secret POSTMAN_SERVICE_ACCOUNT_API_KEY, the same service-account key the bootstrap workflow uses
+# (verified: `postman login --with-api-key` accepts it, and the push works). The service account must be a
+# member of the workspace with edit access. A personal key also works but ties CI to one person.
+name: Publish to Postman workspace
+
+# CI is the only writer to the shared cloud workspace. It runs only after a merge to
+# main, never from a branch or PR, so unreviewed work never appears in the workspace.
+# A merged PR lands as a push to main under the hood (merge commit, squash, or rebase
+# all do), so this already fires on every merge — no separate pull_request trigger needed.
+# Path filter: a commit that changes only this workflow file does NOT trigger it;
+# use "Run workflow" (workflow_dispatch) to test a change to the workflow itself.
+# .postman/resources.yaml is excluded: this workflow itself commits new cloud IDs there
+# after a push, and that commit must not retrigger a publish. (Other .postman/ files such
+# as workflows.yaml still trigger it.)
+on:
+  push:
+    branches: [main]
+    paths:
+      - bookings-api.yaml
+      - postman/**
+      - .postman/**
+      - '!.postman/resources.yaml'
+  workflow_dispatch:
+
+concurrency:                 # shared with the bootstrap workflow: one cloud writer at a time
+  group: postman-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # to commit new cloud IDs back to main
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Postman CLI        # pin the version you tested with
+        run: npm install -g postman-cli@1.73.0
+
+      - name: Log in to Postman
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_SERVICE_ACCOUNT_API_KEY }}   # env var name is what the CLI step reads
+        run: |
+          if [ -z "$POSTMAN_API_KEY" ]; then echo "::error::POSTMAN_API_KEY is not set."; exit 1; fi
+          postman login --with-api-key "$POSTMAN_API_KEY"
+
+      - name: Preview changes            # read-only; default strategy creates/updates, never deletes
+        run: postman workspace diff --push-strategy default
+
+      - name: Push to workspace
+        run: postman workspace push --yes
+
+      # A push assigns cloud IDs to NEW entities and rewrites .postman/resources.yaml on the
+      # runner only. Commit those IDs to main right away (if: always(), so they are recorded even
+      # if a later step fails); otherwise the next run would create duplicates. The push also
+      # strips comments/blank lines and reorders entries, so compare sorted content only and
+      # commit only when real content changed. The commit uses GITHUB_TOKEN (does not trigger
+      # workflows) and resources.yaml is excluded from the path filter above, so no loop.
+      # Needs: the Actions bot allowed to push to main (ruleset bypass if main is protected).
+      - name: Record new cloud IDs in resources.yaml
+        if: always() && github.ref == 'refs/heads/main'
+        run: |
+          norm() { grep -v -E '^[[:space:]]*(#|$)' | sort || true; }
+          if diff <(git show HEAD:.postman/resources.yaml | norm) <(norm < .postman/resources.yaml) >/dev/null; then
+            echo "No new cloud IDs; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .postman/resources.yaml
+          git commit -m "Record new Postman cloud IDs in resources.yaml"
+          git pull --rebase origin main
+          git push origin HEAD:main
