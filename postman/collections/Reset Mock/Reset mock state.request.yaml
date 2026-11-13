@@ -1,0 +1,21 @@
+$kind: http-request
+description: Re-seeds the mock's pm.state (mock-only route, no API key needed).
+url: "{{baseUrl}}/__mock/reset"
+method: POST
+headers:
+  - key: Accept
+    value: application/json
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('Reset returns 200', function () {
+          pm.response.to.have.status(200);
+      });
+
+      pm.test('Mock reports the seed was restored', function () {
+          var body = pm.response.json();
+          pm.expect(body.reset, 'reset flag').to.equal(true);
+          pm.expect(body.bookings, 'seeded booking ids').to.include('bkg_9d2e47');
+      });
+    language: text/javascript
+order: 1000

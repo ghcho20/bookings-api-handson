@@ -1,0 +1,15 @@
+version: 1
+name: Bookings API
+slug: bookings-api
+protocol: http
+port: 4500
+interceptRequests: true
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true
+  # Same handler; it reads the x-mock-scenario header and short-circuits.
+  - name: rate-limited
+    path: ./default.js
+  - name: server-error
+    path: ./default.js
