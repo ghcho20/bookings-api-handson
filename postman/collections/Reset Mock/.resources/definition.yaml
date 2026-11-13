@@ -1,0 +1,26 @@
+$kind: collection
+description: |-
+  Mock-only helper for the local Bookings API mock (postman/mocks/bookings-api).
+
+  Run it before each "[Smoke] Bookings API" or "[Contract] Bookings API" run. Those runs
+  reschedule, confirm and cancel the seeded booking bkg_9d2e47, so a second run without a
+  reset gets 409s. State can survive a mock restart (for example in the Postman app), so a
+  restart is not a reset.
+
+  Hand-written, not generated from bookings-api.yaml: bootstrap does not overwrite it.
+  Not part of the API contract; do not run it against a real environment.
+
+  Pass the same vars as the other runs:
+  --env-var "baseUrl=http://localhost:4500/v1" --env-var "apiKey=<key>"
+variables:
+  - key: baseUrl
+    value: http://localhost:4500/v1
+auth:
+  type: apikey
+  credentials:
+    - key: key
+      value: X-API-Key
+    - key: value
+      value: "{{apiKey}}"
+    - key: in
+      value: header
