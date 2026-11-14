@@ -4,9 +4,13 @@
 # - The gate is this script: `scripts/run-collections.sh [baseUrl] [apiKey]`. It runs
 #   `docker compose up --build --wait`, runs the five steps below in order, and tears the stack down
 #   (`docker compose down -v`) on exit, also when a step fails. It exits non-zero on the first failure.
+#   On failure it first prints `docker compose ps -a` and the last 500 log lines of each container
+#   (grouped as a collapsible section in GitHub Actions), because the teardown removes them.
 # - Working keys: demo-key (full access) and ro_demo-key (read-only). The QA CSV hardcodes demo-key.
 # - The gate runs with ENABLE_TEST_ROUTES=true (exported below).
 # - Collections run with the `local` environment and --no-report-events.
+# - The CI job must run `postman login --with-api-key` before this script: the [Contract] step uses
+#   --output, which the CLI refuses without a login (plain collection runs do not need one).
 # - The CI workflow should trigger on changes to src/**, docker-compose.yml, scripts/**, qa/** and
 #   postman/**, never on the generated-collection refresh alone.
 # - One Contract assertion is exempted from the gate (see KNOWN FAILURE below). Everything else in
@@ -50,6 +54,15 @@ REPORT_DIR="$(mktemp -d)"
 teardown() {
   status=$?
   rm -rf "$REPORT_DIR"
+  if [ "$status" -ne 0 ]; then
+    # The stack is about to be removed, so this is the only chance to see what the backend logged.
+    echo
+    echo "==> gate failed (exit $status): container status and logs"
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::docker compose ps and logs"; fi
+    docker compose ps -a 2>&1 || true
+    docker compose logs --no-color --timestamps --tail=500 2>&1 || true
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::endgroup::"; fi
+  fi
   echo
   echo "==> docker compose down -v"
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -85,7 +98,7 @@ run_contract() {
   local summary
   summary="$(ls "$REPORT_DIR"/*.collection-run-summary.yaml 2>/dev/null | head -n 1 || true)"
   if [ -z "$summary" ]; then
-    echo "GATE FAILED: [Contract] failed (exit $code) and left no run report to classify." >&2
+    echo "GATE FAILED: [Contract] failed (exit $code) and left no run report to classify (--output needs `postman login`)." >&2
     return 1
   fi
   while IFS='=' read -r key value; do
