@@ -2,9 +2,15 @@ name: fern-check
 
 on:
   pull_request:
+    paths:
+      - bookings-api.yaml
+      - fern/**
   push:
     branches:
       - main
+    paths:
+      - bookings-api.yaml
+      - fern/**
 
 jobs:
   run:
