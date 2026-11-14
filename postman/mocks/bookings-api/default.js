@@ -13,6 +13,16 @@
  * Scenarios (header x-mock-scenario): rate-limited (429), server-error (500)
  * Auth: X-API-Key or Authorization: Bearer <token> required (401 otherwise).
  *       A key starting with "ro_" is read-only: writes return 403.
+ *       Auth is checked before any body validation.
+ *
+ * Break-it switch (QA regression demo), off by default:
+ *   MOCK_BREAK_CONFIRM=1 postman mock run postman/mocks/bookings-api --port 4500
+ *   makes POST /v1/bookings/{id}/confirm answer 200 but leave the booking
+ *   "pending" (a silent bug the QA Integration Tests Lifecycle folder catches).
+ *   See BREAK_CONFIRM below. Restart the mock to turn it on or off.
+ *
+ * Endpoint annotations (// @endpoint) cover the 10 spec operations only;
+ * mock-only routes and the webhook receivers are deliberately unannotated.
  *
  * Node built-ins only, no local requires, so it also runs as a single file
  * on a deployed mock server.
@@ -23,6 +33,11 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 4500;
 const BASE = '/v1';
 const PROBLEM_BASE = 'https://api.bookings.example.com/problems/';
+
+// BREAK-IT SWITCH (QA demo only). When true, confirm returns 200 with the
+// booking still "pending". Off unless MOCK_BREAK_CONFIRM=1 is set when the mock
+// starts; never set on a deployed mock server.
+const BREAK_CONFIRM = process.env.MOCK_BREAK_CONFIRM === '1';
 
 // ---------------------------------------------------------------- seed data
 
@@ -187,8 +202,7 @@ const server = http.createServer(async (req, res) => {
 
     // Webhook receivers. The generated collections build these URLs as
     // {{baseUrl}}booking.confirmed, so they arrive as /v1booking.confirmed.
-    // @endpoint POST /v1/booking.confirmed
-    // @endpoint POST /v1/booking.cancelled
+    // Not a spec path (the spec's webhooks are calls the API makes), so not annotated.
     const hook = path.match(/^\/v1\/?(booking\.(confirmed|cancelled))$/);
     if (hook) {
       if (method !== 'POST') return problem(res, 405, 'method-not-allowed', 'Method not allowed', `Use POST for ${hook[1]}.`, null, { Allow: 'POST' });
@@ -350,6 +364,8 @@ const server = http.createServer(async (req, res) => {
       if (!b) return notFound(res, 'booking', m[1]);
       if (m[2] === 'confirm') {
         if (b.status !== 'pending') return invalidTransition(res, b, 'confirmed');
+        // BREAK_CONFIRM: answer 200 without changing the status (silent bug).
+        if (BREAK_CONFIRM) return send(res, 200, b);
         b.status = 'confirmed';
       } else {
         const body = await bodyPromise;

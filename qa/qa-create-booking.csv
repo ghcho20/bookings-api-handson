@@ -1,0 +1,7 @@
+case_name,api_key,resource_id,start_time,end_time,customer_name,customer_email,expected_status
+valid booking,demo-key,res_8b44d0,2026-12-08T09:00:00Z,2026-12-08T10:00:00Z,QA Tester,qa.tester@example.com,201
+unknown resource,demo-key,res_does_not_exist,2026-12-08T13:00:00Z,2026-12-08T14:00:00Z,QA Tester,qa.tester@example.com,404
+end before start,demo-key,res_8b44d0,2026-12-08T15:00:00Z,2026-12-08T14:00:00Z,QA Tester,qa.tester@example.com,422
+slot taken,demo-key,res_8b44d0,2026-12-08T09:00:00Z,2026-12-08T10:00:00Z,QA Tester,qa.tester@example.com,409
+missing API key,,res_8b44d0,2026-12-08T11:00:00Z,2026-12-08T12:00:00Z,QA Tester,qa.tester@example.com,401
+"no key, bad body",,res_8b44d0,2026-12-08T16:00:00Z,2026-12-08T15:00:00Z,QA Tester,qa.tester@example.com,401

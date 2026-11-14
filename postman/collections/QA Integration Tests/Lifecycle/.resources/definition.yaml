@@ -1,0 +1,6 @@
+$kind: collection
+description: |-
+  Walks one booking through its whole lifecycle. Ids pass between requests as collection
+  variables (slot_start, slot_end, booking_id) set in afterResponse scripts. Safe to run alone
+  and repeatable: the booking ends cancelled, which frees its slot.
+order: 1000

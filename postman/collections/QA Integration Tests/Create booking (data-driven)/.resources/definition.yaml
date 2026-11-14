@@ -1,0 +1,6 @@
+$kind: collection
+description: |-
+  One POST /bookings request driven by qa/qa-create-booking.csv; every value, including the API
+  key, comes from a CSV column. Rows are order-dependent (the slot-taken row needs the valid
+  row's booking). Run with: -d qa/qa-create-booking.csv -i "Create booking (data-driven)"
+order: 2000
