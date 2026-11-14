@@ -1,0 +1,26 @@
+$kind: collection
+description: |-
+  Hand-written QA integration tests for the Bookings API, run against the local mock
+  (postman/mocks/bookings-api). QA owns this collection: bootstrap does not overwrite it.
+
+  Folders:
+  - Lifecycle: walks one booking through its whole lifecycle.
+  - Create booking (data-driven): POST /bookings driven by qa/qa-create-booking.csv.
+
+  Run "Reset Mock" before every run of this collection, the CSV run, "[Smoke] Bookings API" and
+  "[Contract] Bookings API". Mock state persists until reset and can survive a mock restart, so a
+  restart is not a reset.
+
+  Pass the same vars as the other runs:
+  -e postman/environments/mock.environment.yaml --env-var "baseUrl=http://localhost:4500/v1" --env-var "apiKey=<key>"
+variables:
+  baseUrl: http://localhost:4500/v1
+  slot_start: ""
+  slot_end: ""
+  booking_id: ""
+auth:
+  type: apikey
+  credentials:
+    key: X-API-Key
+    value: "{{apiKey}}"
+    in: header

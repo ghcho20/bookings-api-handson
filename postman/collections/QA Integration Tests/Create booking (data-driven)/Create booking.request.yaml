@@ -1,0 +1,91 @@
+$kind: http-request
+description: |-
+  Creates a booking from one CSV row and checks the response against expected_status.
+  Uses its own API key auth ({{api_key}}) so a row can send no key. The Idempotency-Key is a
+  fresh {{$guid}} per iteration: the mock replays a repeated key before validating, which
+  would hide an invalid row.
+url: "{{baseUrl}}/bookings"
+method: POST
+headers:
+  - key: Idempotency-Key
+    value: "{{$guid}}"
+  - key: Content-Type
+    value: application/json
+  - key: Accept
+    value: application/json, application/problem+json
+body:
+  type: json
+  content: |-
+    {
+      "resource_id": "{{resource_id}}",
+      "start_time": "{{start_time}}",
+      "end_time": "{{end_time}}",
+      "customer": {
+        "name": "{{customer_name}}",
+        "email": "{{customer_email}}"
+      }
+    }
+auth:
+  type: apikey
+  credentials:
+    - key: key
+      value: X-API-Key
+    - key: value
+      value: "{{api_key}}"
+    - key: in
+      value: header
+scripts:
+  - type: beforeRequest
+    code: |-
+      // Without a data file (e.g. a whole-collection run without -d) there is no row to send.
+      if (!pm.iterationData.has('expected_status')) {
+          console.log('No iteration data: skipping the data-driven create request.');
+          pm.execution.skipRequest();
+      }
+    language: text/javascript
+  - type: afterResponse
+    code: |-
+      var caseName = pm.iterationData.get('case_name');
+      var expected = parseInt(pm.iterationData.get('expected_status'), 10);
+      var code = pm.response.code;
+
+      pm.test('[' + caseName + '] status is ' + expected, function () {
+          pm.expect(code).to.equal(expected);
+      });
+
+      if (expected === 201) {
+          pm.test('[' + caseName + '] Content-Type is application/json', function () {
+              pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');
+          });
+          pm.test('[' + caseName + '] booking is pending with an id', function () {
+              var body = pm.response.json();
+              pm.expect(body.id).to.be.a('string').and.not.empty;
+              pm.expect(body.status).to.equal('pending');
+          });
+      } else {
+          pm.test('[' + caseName + '] Content-Type is application/problem+json', function () {
+              pm.expect(pm.response.headers.get('Content-Type')).to.include('application/problem+json');
+          });
+          pm.test('[' + caseName + '] problem status is ' + expected, function () {
+              pm.expect(pm.response.json().status).to.equal(expected);
+          });
+          if (expected === 409) {
+              pm.test('[' + caseName + '] problem type is slot-taken', function () {
+                  pm.expect(pm.response.json().type).to.match(/slot-taken$/);
+              });
+          }
+          if (expected === 422) {
+              pm.test('[' + caseName + '] errors list names end_time', function () {
+                  var errors = pm.response.json().errors;
+                  pm.expect(errors).to.be.an('array').that.is.not.empty;
+                  pm.expect(errors.map(function (e) { return e.field; })).to.include('end_time');
+              });
+          }
+          if (expected === 401) {
+              pm.test('[' + caseName + '] WWW-Authenticate header is present', function () {
+                  pm.expect(pm.response.headers.get('WWW-Authenticate'), 'WWW-Authenticate').to.be.a('string').and.not.empty;
+              });
+          }
+      }
+    language: text/javascript
+order: 1000

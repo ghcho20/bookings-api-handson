@@ -1,0 +1,58 @@
+$kind: http-request
+description: Books the stored slot with a fresh Idempotency-Key; the booking starts pending.
+url: "{{baseUrl}}/bookings"
+method: POST
+headers:
+  - key: Idempotency-Key
+    value: "{{$guid}}"
+  - key: Content-Type
+    value: application/json
+  - key: Accept
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "resource_id": "res_3f9a1c",
+      "start_time": "{{slot_start}}",
+      "end_time": "{{slot_end}}",
+      "customer": {
+        "name": "QA Lifecycle",
+        "email": "qa.lifecycle@example.com"
+      },
+      "notes": "QA lifecycle test"
+    }
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('Status is 201', function () {
+          pm.response.to.have.status(201);
+      });
+
+      pm.test('Content-Type is application/json', function () {
+          pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');
+      });
+
+      var body = pm.response.json();
+
+      pm.test('Booking is pending on the requested slot', function () {
+          pm.expect(body.id).to.be.a('string').and.not.empty;
+          pm.expect(body.status).to.equal('pending');
+          pm.expect(body.resource_id).to.equal('res_3f9a1c');
+          pm.expect(body.start_time).to.equal(pm.collectionVariables.get('slot_start'));
+          pm.expect(body.end_time).to.equal(pm.collectionVariables.get('slot_end'));
+      });
+
+      pm.test('Not the seeded booking', function () {
+          pm.expect(body.id).to.not.equal('bkg_9d2e47');
+      });
+
+      pm.test('Location header points at the new booking', function () {
+          var location = pm.response.headers.get('Location');
+          pm.expect(location, 'Location header').to.be.a('string');
+          pm.expect(location).to.match(new RegExp('/bookings/' + body.id + '$'));
+      });
+
+      pm.collectionVariables.set('booking_id', body.id);
+    language: text/javascript
+order: 2000
