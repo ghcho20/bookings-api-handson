@@ -1,0 +1,9 @@
+.git
+Dockerfile
+.dockerignore
+*_test.go
+*.test
+bookings-api
+data/
+state.json
+*.tmp

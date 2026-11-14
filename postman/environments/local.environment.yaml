@@ -1,0 +1,12 @@
+name: local
+values:
+  - key: baseUrl
+    value: 'http://localhost:8080/v1'
+    enabled: true
+    type: default
+    description: Bookings API backend started by docker compose (see docker-compose.yml)
+  - key: apiKey
+    value: ''
+    enabled: true
+    type: secret
+    description: 'API key sent as X-API-Key. No value is stored here; pass it with --env-var apiKey=<key>'
