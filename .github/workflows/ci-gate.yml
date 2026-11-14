@@ -1,0 +1,78 @@
+# CI/CD gate: builds the Go backend with Docker Compose and runs every test collection against it.
+# The whole gate is scripts/run-collections.sh (step 06): it runs `docker compose up --build --wait`
+# from the repo root, then Reset Mock, [Smoke], [Contract], and the QA Lifecycle and data-driven
+# collections, and tears the stack down at the end (also when a step fails). Any failure fails this job.
+#
+# Runs on pushes to main and on pull requests that change the backend, the compose file or the gate script,
+# and by hand ("Run workflow"). Path filters skip a commit that changes only an unlisted file, so this
+# workflow's own file is listed: editing it re-runs the gate.
+#
+# Needs the secret POSTMAN_SERVICE_ACCOUNT_API_KEY, used only to log the Postman CLI in: the [Contract]
+# step runs with --output (so the known Idempotency-Key failure can be recognized) and the CLI refuses
+# --output without a login. Plain collection runs do not need it. The collections still run from the repo
+# files with --no-report-events, so nothing is uploaded. Secrets are not given to pull requests from
+# forks, so those cannot run the gate. Docker and Docker Compose are preinstalled on ubuntu-latest.
+# To make the gate block merges, mark the `gate` check as required in the repository's branch
+# protection or ruleset settings (not available on every plan).
+name: ci-gate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - scripts/**
+      - src/**
+      - docker-compose.yml
+      - .github/workflows/ci-gate.yml
+  pull_request:
+    paths:
+      - scripts/**
+      - src/**
+      - docker-compose.yml
+      - .github/workflows/ci-gate.yml
+  workflow_dispatch:
+
+# A newer push to the same pull request replaces the running gate; runs on main are never cancelled.
+concurrency:
+  group: ci-gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Install Postman CLI        # same pinned version as postman-publish.yml
+        run: npm install -g postman-cli@1.73.0
+
+      # Same pattern as postman-publish.yml. The login is for `--output` in the [Contract] step only.
+      - name: Log in to Postman
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_SERVICE_ACCOUNT_API_KEY }}
+        run: |
+          if [ -z "$POSTMAN_API_KEY" ]; then
+            echo "::error::POSTMAN_SERVICE_ACCOUNT_API_KEY is not set (pull requests from forks get no secrets). The [Contract] step needs a Postman login for --output."
+            exit 1
+          fi
+          postman login --with-api-key "$POSTMAN_API_KEY"
+
+      - name: Show tool versions
+        run: |
+          docker --version
+          docker compose version
+          postman --version
+
+      - name: Run the gate
+        run: bash scripts/run-collections.sh
