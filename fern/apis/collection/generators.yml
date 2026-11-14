@@ -3,3 +3,24 @@
 api:
   specs:
     - openapi: ../../../bookings-api.yaml
+default-group: local
+groups:
+  local:
+    generators:
+      - name: fern-python-sdk
+        version: 5.41.29
+        output:
+          location: local-file-system
+          path: ../../sdks/python
+      - name: fern-typescript-sdk
+        version: 3.109.0
+        output:
+          location: local-file-system
+          path: ../../sdks/typescript
+        # github:
+        #   repository: your-org/dm-bookings-python   # SDK destination repo
+        #   mode: pull-request                         # or "release" or "push"
+        # output:
+        #   location: pypi
+        #   package-name: dm-bookings-sdk
+        #   token: ${PYPI_TOKEN}

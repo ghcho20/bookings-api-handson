@@ -1,0 +1,70 @@
+name: publish-sdks
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - bookings-api.yaml
+      - fern/fern.config.json
+      - fern/apis/collection/generators.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write            # to commit the generated SDKs (fern/sdks/) back to main
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Setup Fern CLI
+        uses: fern-api/setup-fern-cli@v1
+
+      - name: Publish SDKs
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+          FERN_ALLOW_OLD_CLI_VERSION: true
+        run: fern generate --log-level debug
+
+      # `fern generate` writes the SDKs to fern/sdks/ (generators.yml: output path ../../sdks/<lang>).
+      # Commit only that folder, and only after a successful generation (a failed run may leave a
+      # half-written folder). If nothing changed there is no commit. The commit uses GITHUB_TOKEN,
+      # which does not trigger other workflows, and fern/sdks/** is not in this workflow's paths,
+      # so the bot commit cannot retrigger it. Needs the Actions bot allowed to push to main.
+      - name: Commit and push the generated SDKs
+        if: success() && github.ref == 'refs/heads/main'
+        run: |
+          if [ ! -d fern/sdks ]; then
+            echo "::error::fern/sdks was not created. Check output.path in fern/apis/collection/generators.yml."
+            git status --short | head -20
+            exit 1
+          fi
+          git add -- fern/sdks
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git status --short | head -20
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "SDK: regenerate SDKs with Fern"
+          # Bootstrap or Publish may push to main at the same time, so retry on a lost race.
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; retrying."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not push the generated SDKs to main."
+          exit 1
