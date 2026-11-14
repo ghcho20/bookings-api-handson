@@ -1,0 +1,34 @@
+# Notes for step 07 (CI):
+# - This compose file is at the repo root, not in src/. The Go backend (code, Dockerfile) is under src/.
+# - The gate is `scripts/run-collections.sh`. It runs `docker compose up --build --wait` from the root,
+#   runs every test collection, and tears the stack down (also when a step fails).
+# - Working API keys: demo-key (full access) and ro_demo-key (read-only).
+# - The gate runs with ENABLE_TEST_ROUTES=true (the "Reset Mock" collection needs POST /v1/__mock/reset).
+# - Postman collections run with the `local` environment and --no-report-events.
+# - The CI workflow should trigger on changes to src/**, docker-compose.yml, scripts/**, qa/** and
+#   postman/**, never on the generated-collection refresh alone.
+#
+# The values below are test-server defaults. Each can be overridden from the environment.
+services:
+  bookings-api:
+    build: ./src
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    environment:
+      PORT: ${PORT:-8080}
+      DATA_FILE: ${DATA_FILE:-/data/state.json}
+      API_KEYS: ${API_KEYS:-demo-key}
+      API_KEYS_READONLY: ${API_KEYS_READONLY:-ro_demo-key}
+      ENABLE_TEST_ROUTES: ${ENABLE_TEST_ROUTES:-true}
+    volumes:
+      - bookings-data:/data
+    healthcheck:
+      # The image has no shell or curl: the binary probes GET /healthz itself.
+      test: ["CMD", "/bookings-api", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+volumes:
+  bookings-data:
