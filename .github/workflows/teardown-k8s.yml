@@ -1,0 +1,207 @@
+# Removes what publish-k8s.yml and deploy-k8s.yml produced, so the demo costs nothing while idle.
+#
+# Manual only (workflow_dispatch), and only after typing `teardown` in the confirm field. It
+#   1. deletes the Kubernetes objects in k8s/ (Deployment and Service in namespace gcho). Deleting the Service
+#      makes the AWS Load Balancer Controller remove the Network Load Balancer, and the run waits until it is gone;
+#   2. resets k8s/kustomization.yaml to `undeployed` (bot commit to main), so git no longer claims a live version;
+#   3. deletes the images publish-k8s.yml pushed to ECR: the ones tagged with a full commit sha. Hand-pushed
+#      test images (other tags) and untagged leftovers are kept unless `include_manual_images` is ticked.
+#      Untick `delete_images` to keep every image and only take the deployment down.
+#
+# It is safe to run twice: whatever is already gone is skipped.
+#
+# What it never removes (so publish and deploy can simply be run again): the ECR repository itself, the namespace
+# gcho, the IAM roles, the EKS access entries, and the GitHub OIDC provider. Those cost nothing while idle.
+#
+# AWS: signs in with GitHub OIDC as github-actions-bookings-api-teardown. Its trust policy only accepts this repo,
+# main, and this workflow file. It can delete images in the one ECR repository and, through an EKS access entry
+# limited to namespace gcho, delete objects there. It shares a concurrency group with deploy-k8s.yml so the two
+# never run at the same time; avoid running publish-k8s.yml during a teardown, which could push a new image
+# while images are being deleted. The commit-back uses GITHUB_TOKEN (no other workflow is triggered) and needs
+# the Actions bot allowed to push to main, as the other workflows do.
+name: teardown-k8s
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type teardown to confirm. This deletes the running demo."
+        required: true
+        type: string
+      delete_images:
+        description: "Also delete the images publish-k8s pushed to ECR (tags that are a full commit sha)."
+        required: false
+        default: true
+        type: boolean
+      include_manual_images:
+        description: "Also delete hand-pushed test images (other tags) and untagged images."
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: deploy-k8s    # shared with deploy-k8s.yml on purpose
+  cancel-in-progress: false
+
+permissions:
+  contents: write      # bot commit that resets the recorded tag
+  id-token: write      # GitHub OIDC -> AWS
+
+env:
+  AWS_REGION: us-east-2
+  CLUSTER_NAME: se-kube-demo
+  NAMESPACE: gcho
+  ECR_REPOSITORY: gcho/bookings-api
+  AWS_ROLE_ARN: arn:aws:iam::005904641462:role/github-actions-bookings-api-teardown
+  LB_NAME_PREFIX: k8s-gcho-bookings-
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The AWS role only accepts main.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Check the confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "teardown" ]; then
+            echo "::error::Not confirmed. Type teardown in the confirm field to run this."
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0        # the bot commit below is pushed to main
+
+      - name: Sign in to AWS (OIDC)
+        id: aws
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # If the role cannot be assumed, say what usually causes it. This step only runs after a failed sign-in.
+      - name: Explain a failed AWS sign-in
+        if: ${{ failure() && steps.aws.outcome == 'failure' }}
+        run: |
+          echo "::error::Could not sign in to AWS with the role $AWS_ROLE_ARN. If the role was removed (for example by scripts/aws-resources.sh down), run scripts/aws-resources.sh up with admin AWS credentials and rerun this workflow. Otherwise check that this run is on main and that the role's trust policy still matches this repository and this workflow file."
+          exit 1
+
+      - name: Show tool versions
+        run: |
+          aws --version
+          kubectl version --client
+          yq --version
+          jq --version
+
+      - name: Connect to the cluster
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Show what is there now
+        run: |
+          echo "--- Kubernetes objects in $NAMESPACE"
+          kubectl -n "$NAMESPACE" get deployment,service,pod -l app.kubernetes.io/name=bookings-api || true
+          echo "--- ECR images in $ECR_REPOSITORY"
+          if out=$(aws ecr list-images --repository-name "$ECR_REPOSITORY" --output json 2>&1); then
+            echo "$out" | jq -r '.imageIds[] | (.imageTag // ("(untagged) " + .imageDigest))'
+          elif echo "$out" | grep -q RepositoryNotFoundException; then
+            echo "The ECR repository does not exist (already removed); no images to list."
+          else
+            echo "$out" >&2
+            exit 1
+          fi
+
+      - name: Delete the Kubernetes objects
+        run: kubectl delete -k k8s/ --ignore-not-found --wait=true --timeout=300s
+
+      # Deleting the Service tells the AWS Load Balancer Controller to remove the load balancer, which takes a moment.
+      - name: Wait for the load balancer to disappear
+        run: |
+          for i in $(seq 1 30); do
+            left=$(aws elbv2 describe-load-balancers \
+                     --query "LoadBalancers[?starts_with(LoadBalancerName, '${LB_NAME_PREFIX}')].LoadBalancerName" \
+                     --output text)
+            if [ -z "$left" ]; then echo "No $LB_NAME_PREFIX* load balancer left."; exit 0; fi
+            echo "Still deleting: $left"
+            sleep 10
+          done
+          echo "::warning::A load balancer named $LB_NAME_PREFIX* still exists after 5 minutes. Check the EC2 console; the controller may still be deleting it."
+
+      - name: Reset the recorded tag in k8s/kustomization.yaml
+        run: |
+          yq -i '.images[0].newTag = "undeployed"' k8s/kustomization.yaml
+          if git diff --quiet -- k8s/kustomization.yaml; then
+            echo "k8s/kustomization.yaml already says undeployed; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/kustomization.yaml
+          git commit -m "Teardown: bookings-api removed from $NAMESPACE on $CLUSTER_NAME"
+          # Other workflows also push to main, so retry on a lost race.
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; retrying."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not record the teardown in git. Set newTag in k8s/kustomization.yaml to undeployed by hand."
+          exit 1
+
+      - name: Delete the ECR images
+        if: ${{ inputs.delete_images }}
+        env:
+          INCLUDE_MANUAL: ${{ inputs.include_manual_images }}
+        run: |
+          if ! ALL=$(aws ecr list-images --repository-name "$ECR_REPOSITORY" --output json 2>&1); then
+            if echo "$ALL" | grep -q RepositoryNotFoundException; then
+              echo "The ECR repository does not exist (already removed); no images to delete."
+              exit 0
+            fi
+            echo "$ALL" >&2
+            exit 1
+          fi
+          if [ "$INCLUDE_MANUAL" = "true" ]; then
+            # Every image: tagged ones by tag, untagged ones by digest.
+            IDS=$(echo "$ALL" | jq -c '[.imageIds[] | if .imageTag then {imageTag} else {imageDigest} end]')
+          else
+            # Only what publish-k8s.yml pushes: tags that are a full 40-character commit sha.
+            IDS=$(echo "$ALL" | jq -c '[.imageIds[] | select(.imageTag != null and (.imageTag | test("^[0-9a-f]{40}$"))) | {imageTag}]')
+          fi
+          N=$(echo "$IDS" | jq 'length')
+          if [ "$N" -eq 0 ]; then
+            echo "No images to delete."
+            exit 0
+          fi
+          echo "Deleting $N image reference(s):"
+          echo "$IDS" | jq -r '.[] | (.imageTag // .imageDigest)'
+          # batch-delete-image takes at most 100 images per call.
+          echo "$IDS" | jq -c '_nwise(100)' | while read -r chunk; do
+            failures=$(aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY" --image-ids "$chunk" \
+                         --query 'failures' --output json)
+            if [ "$failures" != "[]" ]; then
+              echo "::error::Some images could not be deleted: $failures"
+              exit 1
+            fi
+          done
+          echo "Deleted $N image reference(s)."
+
+      - name: Summary
+        if: always()
+        env:
+          DELETE_IMAGES: ${{ inputs.delete_images }}
+          INCLUDE_MANUAL: ${{ inputs.include_manual_images }}
+        run: |
+          {
+            echo "### teardown-k8s"
+            echo "- removed: Deployment and Service in namespace \`$NAMESPACE\` on \`$CLUSTER_NAME\`, and the load balancer"
+            echo "- recorded tag reset to \`undeployed\`"
+            echo "- ECR images deleted: \`$DELETE_IMAGES\` (including hand-pushed and untagged: \`$INCLUDE_MANUAL\`)"
+            echo "- kept: ECR repository \`$ECR_REPOSITORY\`, the \`$NAMESPACE\` namespace, IAM roles, EKS access entries, the OIDC provider"
+            echo "- to bring it back: run **publish-k8s** (if needed), then **deploy-k8s** with an image_tag"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -55,10 +55,33 @@ jobs:
           fetch-depth: 0        # the bot commit below is pushed to main
 
       - name: Sign in to AWS (OIDC)
+        id: aws
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # If the role cannot be assumed, say what usually causes it. This step only runs after a failed sign-in.
+      - name: Explain a failed AWS sign-in
+        if: ${{ failure() && steps.aws.outcome == 'failure' }}
+        run: |
+          echo "::error::Could not sign in to AWS with the role $AWS_ROLE_ARN. If the role was removed (for example by scripts/aws-resources.sh down), run scripts/aws-resources.sh up with admin AWS credentials and rerun this workflow. Otherwise check that this run is on main and that the role's trust policy still matches this repository and this workflow file."
+          exit 1
+
+      # The workflows never create the repository: scripts/aws-resources.sh up does. Say so instead of failing later with
+      # a confusing "tag not found" or push error. describe-images is used because this role may call it on the repository.
+      - name: Check that the ECR repository exists
+        run: |
+          if out=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --max-items 1 2>&1); then
+            echo "ECR repository $ECR_REPOSITORY exists."
+          elif echo "$out" | grep -q RepositoryNotFoundException; then
+            echo "::error::The ECR repository $ECR_REPOSITORY does not exist. Run scripts/aws-resources.sh up with admin AWS credentials (scripts/aws-resources.sh status shows what is missing), then rerun this workflow."
+            exit 1
+          else
+            echo "$out" >&2
+            echo "::error::Could not check the ECR repository $ECR_REPOSITORY; see the message above."
+            exit 1
+          fi
 
       - name: Show tool versions
         run: |
