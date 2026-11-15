@@ -1,0 +1,162 @@
+# Deploys the Bookings API to Kubernetes: namespace gcho on the se-kube-demo EKS cluster (us-east-2).
+#
+# Manual only (workflow_dispatch). It applies k8s/ from main with `kubectl apply -k k8s/`, waits for the
+# rollout, prints the public URL of the load balancer, and then records what is now live by committing the
+# image tag into k8s/kustomization.yaml (bot commit to main). Git therefore shows what is DEPLOYED, not what
+# was merely built: publish-k8s.yml only pushes images to ECR and never touches this file.
+#
+# Which image:
+#   - image_tag given:  deploy that tag. It must already exist in ECR: a commit sha built by publish-k8s, or a
+#                       hand-pushed test image such as dev-<name>-1.
+#   - image_tag empty:  redeploy the tag recorded in k8s/kustomization.yaml, i.e. what is live now (useful after
+#                       changing the manifests). A newer build in ECR is never picked up implicitly.
+# `undeployed` in kustomization.yaml means nothing has been deployed yet; then image_tag is required.
+#
+# AWS: signs in with GitHub OIDC as github-actions-bookings-api-deploy. Its trust policy only accepts this
+# repo, main, and this workflow file. In the cluster it has an EKS access entry with AmazonEKSEditPolicy
+# limited to the namespace gcho, so it cannot touch anything else. The commit-back uses GITHUB_TOKEN, which
+# does not trigger other workflows; it needs the Actions bot allowed to push to main (as the others do).
+name: deploy-k8s
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (a commit sha from publish-k8s, or a dev-<name>-<n> test image). Empty = redeploy the tag recorded in k8s/kustomization.yaml."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: deploy-k8s
+  cancel-in-progress: false
+
+permissions:
+  contents: write      # bot commit that records the deployed tag
+  id-token: write      # GitHub OIDC -> AWS
+
+env:
+  AWS_REGION: us-east-2
+  CLUSTER_NAME: se-kube-demo
+  NAMESPACE: gcho
+  ECR_REPOSITORY: gcho/bookings-api
+  AWS_ROLE_ARN: arn:aws:iam::005904641462:role/github-actions-bookings-api-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The AWS role only accepts main.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0        # the bot commit below is pushed to main
+
+      - name: Sign in to AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Show tool versions
+        run: |
+          aws --version
+          kubectl version --client
+          yq --version
+
+      - name: Connect to the cluster
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Choose and check the image tag
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          RECORDED="$(yq '.images[0].newTag' k8s/kustomization.yaml)"
+          TAG="${INPUT_TAG:-$RECORDED}"
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ] || [ "$TAG" = "undeployed" ]; then
+            echo "::error::Nothing has been deployed yet, so there is no tag to redeploy. Pass image_tag (a commit sha built by publish-k8s)."
+            exit 1
+          fi
+          if ! aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "::error::Image tag $TAG is not in ECR repository $ECR_REPOSITORY. Run publish-k8s for that commit, or push the test image first."
+            exit 1
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RECORDED=$RECORDED" >> "$GITHUB_ENV"
+          echo "Deploying image tag $TAG (recorded in git: $RECORDED)"
+          # Apply this tag. It is committed only after the rollout succeeds.
+          TAG="$TAG" yq -i '.images[0].newTag = strenv(TAG)' k8s/kustomization.yaml
+
+      - name: Show what will be applied
+        run: kubectl kustomize k8s/ | grep -E "^kind:|image:|replicas:"
+
+      - name: Apply the manifests
+        run: kubectl apply -k k8s/
+
+      - name: Wait for the rollout
+        run: kubectl -n "$NAMESPACE" rollout status deployment/bookings-api --timeout=300s
+
+      - name: Find the public URL and check it
+        run: |
+          HOST=""
+          for i in $(seq 1 30); do
+            HOST=$(kubectl -n "$NAMESPACE" get service bookings-api \
+                     -o 'jsonpath={.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          if [ -z "$HOST" ]; then
+            echo "::warning::The load balancer has no address yet. Check: kubectl -n $NAMESPACE get service bookings-api"
+            exit 0
+          fi
+          URL="http://$HOST"
+          echo "URL=$URL" >> "$GITHUB_ENV"
+          # A new load balancer can take a few minutes to start answering (DNS and health checks).
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 "$URL/healthz" >/dev/null 2>&1; then ok=yes; break; fi
+            sleep 10
+          done
+          if [ -n "$ok" ]; then echo "$URL/healthz is answering."; else echo "::warning::$URL/healthz is not answering yet; it may still be warming up."; fi
+
+      # Only reached when the rollout succeeded: git now records what is live.
+      - name: Record the deployed tag in k8s/kustomization.yaml
+        run: |
+          if git diff --quiet -- k8s/kustomization.yaml; then
+            echo "k8s/kustomization.yaml already records $TAG; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/kustomization.yaml
+          git commit -m "Deploy: bookings-api $TAG to $NAMESPACE on $CLUSTER_NAME"
+          # Other workflows also push to main, so retry on a lost race.
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; retrying."
+            sleep $((attempt * 5))
+          done
+          echo "::error::The deploy succeeded but the tag could not be recorded in git. Update k8s/kustomization.yaml to $TAG by hand."
+          exit 1
+
+      - name: Pod status and logs on failure
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" get pods,service -o wide || true
+          kubectl -n "$NAMESPACE" describe deployment/bookings-api || true
+          kubectl -n "$NAMESPACE" logs deployment/bookings-api --tail=100 || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### deploy-k8s"
+            echo "- cluster: \`$CLUSTER_NAME\` ($AWS_REGION), namespace \`$NAMESPACE\`"
+            echo "- image tag: \`${TAG:-unknown}\` (previously recorded: \`${RECORDED:-unknown}\`)"
+            echo "- API base URL: \`${URL:-pending}/v1\`  (key: \`demo-key\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
