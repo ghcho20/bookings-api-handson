@@ -1,0 +1,19 @@
+# Kubernetes manifests for the Bookings API demo: namespace gcho on the se-kube-demo EKS cluster (us-east-2).
+#
+# Flow: publish-k8s.yml builds an image per commit after the ci-gate passes and pushes it to ECR; it does not
+# touch this folder. deploy-k8s.yml, which is run by hand with an image tag, applies this folder with
+# `kubectl apply -k k8s/` and, once the rollout succeeds, commits that tag into the `images:` entry below.
+# So `newTag` is what is deployed, not what was last built, and git records every deployment.
+#
+# Do not edit `images:` by hand: deploy-k8s.yml owns it. `undeployed` means nothing has been deployed yet;
+# deploy-k8s.yml then requires an image_tag.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: gcho
+resources:
+  - deployment.yaml
+  - service.yaml
+images:
+  - name: bookings-api
+    newName: 005904641462.dkr.ecr.us-east-2.amazonaws.com/gcho/bookings-api
+    newTag: undeployed

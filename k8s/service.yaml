@@ -1,0 +1,24 @@
+# Public entry point: AWS creates a load balancer for a Service of type LoadBalancer. The Postman cloud
+# (monitors) and the test collections reach the API at http://<load balancer host>/v1. It is plain HTTP and
+# open to the internet, with the demo API keys: keep the demo short-lived.
+#
+# On this cluster the AWS Load Balancer Controller handles the Service and builds a Network Load Balancer, which
+# is INTERNAL unless told otherwise (an internal one is unreachable from GitHub runners and from the Postman
+# cloud). The scheme annotation below makes it internet-facing. The scheme of an existing load balancer cannot
+# be changed in place: the controller replaces it, so the public host name is new.
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookings-api
+  labels:
+    app.kubernetes.io/name: bookings-api
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: bookings-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

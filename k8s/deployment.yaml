@@ -1,0 +1,73 @@
+# One pod, one container, no replicas: this is a demo. The backend keeps its state in a JSON file under
+# /data, which here is an emptyDir, so a new pod starts from the seed data (POST /v1/__mock/reset does the
+# same on demand). The image name `bookings-api` is a placeholder that kustomization.yaml replaces.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookings-api
+  labels:
+    app.kubernetes.io/name: bookings-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bookings-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bookings-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bookings-api
+          image: bookings-api
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DATA_FILE
+              value: /data/state.json
+            # Test-server defaults, the same keys the CI gate uses. Fine for a demo; never for real data.
+            - name: API_KEYS
+              value: demo-key
+            - name: API_KEYS_READONLY
+              value: ro_demo-key
+            # The Reset Mock collection needs POST /v1/__mock/reset. Turn this off for anything real.
+            - name: ENABLE_TEST_ROUTES
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}

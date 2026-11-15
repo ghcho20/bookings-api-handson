@@ -1,0 +1,129 @@
+# Builds the Bookings API container image and pushes it to ECR. It deploys nothing and changes nothing in git.
+#
+#   ci-gate passes on main  ->  build ./src  ->  push to ECR as gcho/bookings-api:<commit sha>
+#
+# Publishing only makes an image available. deploy-k8s.yml (run by hand) decides what runs in the cluster, and
+# records what it deployed in k8s/kustomization.yaml. A newer build in ECR therefore never changes what is live.
+#
+# One image per source commit. The image tag is the full commit sha, and tags in this repository are immutable.
+# If that tag already exists, this workflow skips the build and the push, but only after checking that the image
+# carries the label `ci.workflow=publish-k8s` and `org.opencontainers.image.revision=<sha>`, which only this
+# workflow sets. An image someone pushed by hand under the bare commit sha lacks them, so the run FAILS instead
+# of silently trusting it. Hand-pushed test images should use their own prefix (for example dev-<name>-1); this
+# workflow ignores those, and deploy-k8s.yml can still deploy them by tag.
+#
+# When it runs (the ci-gate is the dependency, and it must have passed on the exact commit being published):
+#   - automatically, when the `ci-gate` workflow completes successfully on main (workflow_run). The gate is
+#     path-filtered (scripts/**, src/**, docker-compose.yml), so this runs for the same changes only.
+#   - by hand ("Run workflow" on main). The first step still insists that ci-gate has a successful run for
+#     the commit being published; if not, run ci-gate on this commit first. The gate is never bypassed.
+#
+# AWS: signs in with GitHub OIDC as github-actions-bookings-api-publish. That role can only push images to
+# the one ECR repository, and its trust policy only accepts this repo, main, and this workflow file.
+name: publish-k8s
+
+on:
+  workflow_run:
+    workflows: [ci-gate]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-k8s
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write      # GitHub OIDC -> AWS
+  actions: read        # look up the ci-gate run for this commit
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: gcho/bookings-api
+  AWS_ROLE_ARN: arn:aws:iam::005904641462:role/github-actions-bookings-api-publish
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only the main branch (the AWS role refuses anything else), and for workflow_run only a passed gate.
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    env:
+      # The commit the gate tested: for workflow_run its head sha, for a manual run the commit it started on.
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Require a passed ci-gate for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-gate.yml --commit "$SHA" \
+                     --status success --json databaseId --jq 'length')
+          if [ "$passed" -lt 1 ]; then
+            echo "::error::ci-gate has no successful run for $SHA. Run the ci-gate workflow on this commit first."
+            exit 1
+          fi
+          echo "ci-gate passed for $SHA"
+
+      - name: Checkout the commit the gate tested
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Sign in to AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Show tool versions
+        run: |
+          docker --version
+          aws --version
+
+      # One image per commit. If the tag exists it must be CI's own image, otherwise the run fails.
+      - name: Build and push the image (skipped if CI already published this commit)
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$SHA" >/dev/null 2>&1; then
+            # The tag exists. Image tags here are immutable, so it cannot be overwritten: check who built it.
+            docker pull --quiet "$IMAGE:$SHA" >/dev/null
+            built_by=$(docker image inspect "$IMAGE:$SHA" --format '{{ index .Config.Labels "ci.workflow" }}')
+            revision=$(docker image inspect "$IMAGE:$SHA" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            if [ "$built_by" = "publish-k8s" ] && [ "$revision" = "$SHA" ]; then
+              echo "$IMAGE:$SHA was already published by CI; skipping the build and the push."
+              echo "status=already-published" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::$IMAGE:$SHA exists but was not built by this workflow (ci.workflow='$built_by', revision='$revision'). Tags are immutable, so CI cannot replace it. Delete that image from ECR and rerun, and use a dev-<name>-<n> tag for hand-pushed test images."
+              exit 1
+            fi
+          else
+            docker build \
+              --label "ci.workflow=publish-k8s" \
+              --label "org.opencontainers.image.revision=$SHA" \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              -t "$IMAGE:$SHA" src
+            docker push "$IMAGE:$SHA"
+            echo "status=pushed" >> "$GITHUB_OUTPUT"
+          fi
+          echo "image=$IMAGE:$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          STATUS: ${{ steps.image.outputs.status }}
+        run: |
+          {
+            echo "### publish-k8s"
+            echo "- commit: \`$SHA\`"
+            echo "- image: \`${IMAGE:-not published}\` (${STATUS:-failed})"
+            echo "- nothing was deployed. To roll it out, run **deploy-k8s** with image_tag \`$SHA\`."
+          } >> "$GITHUB_STEP_SUMMARY"
